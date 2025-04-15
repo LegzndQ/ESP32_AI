@@ -38,6 +38,29 @@ void IRAM_ATTR onMotionDetected() {
     mpuInterrupt = true; // 设置中断标志
 }
 
+// 添加全局变量用于记录 HALL 传感器的脉冲计数
+volatile unsigned long hallA1Count = 0;
+volatile unsigned long hallA2Count = 0;
+volatile unsigned long hallB1Count = 0;
+volatile unsigned long hallB2Count = 0;
+
+// 中断服务程序（ISR）用于记录 HALL 传感器的脉冲
+void IRAM_ATTR onHallA1Pulse() {
+    hallA1Count++;
+}
+
+void IRAM_ATTR onHallA2Pulse() {
+    hallA2Count++;
+}
+
+void IRAM_ATTR onHallB1Pulse() {
+    hallB1Count++;
+}
+
+void IRAM_ATTR onHallB2Pulse() {
+    hallB2Count++;
+}
+
 // 卡尔曼滤波器结构体
 struct KalmanFilter {
     float Q_angle; // 过程噪声协方差（角度）
@@ -127,6 +150,23 @@ void stopCar() {
     setMotorPWM(0, 0);
 }
 
+void resetHallCounts() {
+    hallA1Count = 0;
+    hallA2Count = 0;
+    hallB1Count = 0;
+    hallB2Count = 0;
+}
+
+void sendData(float accelX, float accelY, float accelZ, float gyroX, float gyroY, float gyroZ, 
+    float motorASpeed, float motorBSpeed, int pwmA, int pwmB) {
+    char buffer[200];
+    snprintf(buffer, sizeof(buffer), "%ld,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d",
+    millis(), accelX, accelY, accelZ, gyroX, gyroY, gyroZ, motorASpeed, motorBSpeed, pwmA, pwmB);
+    udp.beginPacket(serverIP, udpPort);
+    udp.print(buffer);
+    udp.endPacket();
+}
+
 void setup() {
     Serial.begin(115200);
     Wire.begin(21, 20);  // 指定 ESP32-S3 的 I2C 引脚
@@ -138,10 +178,16 @@ void setup() {
     pinMode(MOTOR_A_PWM2, OUTPUT);
     pinMode(MOTOR_B_PWM1, OUTPUT);
     pinMode(MOTOR_B_PWM2, OUTPUT);
-    pinMode(HALL_A1, INPUT);
-    pinMode(HALL_A2, INPUT);
-    pinMode(HALL_B1, INPUT);
-    pinMode(HALL_B2, INPUT);
+    pinMode(HALL_A1, INPUT_PULLUP);
+    pinMode(HALL_A2, INPUT_PULLUP);
+    pinMode(HALL_B1, INPUT_PULLUP);
+    pinMode(HALL_B2, INPUT_PULLUP);
+
+    // 配置 HALL 传感器中断
+    attachInterrupt(digitalPinToInterrupt(HALL_A1), onHallA1Pulse, RISING);
+    attachInterrupt(digitalPinToInterrupt(HALL_A2), onHallA2Pulse, RISING);
+    attachInterrupt(digitalPinToInterrupt(HALL_B1), onHallB1Pulse, RISING);
+    attachInterrupt(digitalPinToInterrupt(HALL_B2), onHallB2Pulse, RISING);
 
     // 配置 MPU6050 中断
     pinMode(MPU_INT_PIN, INPUT_PULLUP); // 设置 MPU6050 INT 引脚为输入
@@ -152,12 +198,12 @@ void setup() {
     mpu.setMotionDetectionDuration(5);  // 设置运动检测持续时间
     mpu.setIntMotionEnabled(true);      // 启用运动检测中断
 
-    if (mpu.testConnection()) {
-        Serial.println("MPU6050 连接成功！");
-    } else {
-        Serial.println("MPU6050 连接失败！");
-        while (1); // 连接失败，停止程序
-    }
+    // if (mpu.testConnection()) {
+    //     Serial.println("MPU6050 连接成功！");
+    // } else {
+    //     Serial.println("MPU6050 连接失败！");
+    //     while (1); // 连接失败，停止程序
+    // }
 
     WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED) {
@@ -211,19 +257,27 @@ void loop() {
         // 打印滤波后的数据
         Serial.printf("滤波后数据: AccelX=%.2f, AccelY=%.2f, AccelZ=%.2f, GyroX=%.2f, GyroY=%.2f, GyroZ=%.2f\n",
                       filteredAccelX, filteredAccelY, filteredAccelZ, filteredGyroX, filteredGyroY, filteredGyroZ);
+        
+        static unsigned long lastHallTime = 0;
+        //unsigned long currentTime = millis();
+        unsigned long timeDiff = currentTime - lastHallTime;
 
-        // 如果正在采集数据，将数据通过 Wi-Fi 发送到电脑
-        if (collectingData) {
-            char buffer[200];
-            snprintf(buffer, sizeof(buffer), "%ld,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d",
-                     millis(), filteredAccelX, filteredAccelY, filteredAccelZ,
-                     filteredGyroX, filteredGyroY, filteredGyroZ,
-                     digitalRead(HALL_A1), digitalRead(HALL_A2),
-                     digitalRead(HALL_B1), digitalRead(HALL_B2),
-                     motorAPWM, motorBPWM);
-            udp.beginPacket(serverIP, udpPort);
-            udp.print(buffer);
-            udp.endPacket();
+        // 每 50ms 计算一次角速度
+        if (timeDiff >= 50) {
+            lastHallTime = currentTime;
+
+            // 计算角速度（一圈7个脉冲）
+            float motorASpeed = hallA1Count * (360.0 / 7 / timeDiff); // 单位：度/秒
+            float motorBSpeed = hallB1Count * (360.0 / 7 / timeDiff); // 单位：度/秒
+
+            // 清零脉冲计数
+            resetHallCounts();
+
+            // 如果正在采集数据，将数据通过 Wi-Fi 发送到电脑
+            if (collectingData) {
+                sendData(filteredAccelX, filteredAccelY, filteredAccelZ, filteredGyroX, filteredGyroY, filteredGyroZ, 
+                    motorASpeed, motorBSpeed, motorAPWM, motorBPWM);
+            }
         }
     }
 
@@ -257,11 +311,11 @@ void loop() {
                 collectingData = false;
                 stopCar();
                 break;
-            case 0xFF6897: // 设置两轮 PWM 为 150
+            case 0xFF6897: // 设置两轮 PWM 为 -150，负数为正转
                 collectingData = true;
                 motorAPWM = 150;
                 motorBPWM = 150;
-                setMotorPWM(motorAPWM, motorBPWM);
+                setMotorPWM(-motorAPWM, -motorBPWM);
                 break;
         }
         irrecv.resume();
