@@ -18,7 +18,7 @@
 
 const char* ssid = "Legznd";
 const char* password = "12345678";
-const char* serverIP = "172.20.10.10";  // 电脑端 IP
+const char* serverIP = "172.20.10.11";  // 电脑端 IP
 const int udpPort = 12345;
 
 WiFiUDP udp;
