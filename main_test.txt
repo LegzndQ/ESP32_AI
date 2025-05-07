@@ -1,0 +1,141 @@
+# mpu6050不以中断的形式，而是以50ms定期检测的方式。
+
+void setup() {
+    Serial.begin(115200);
+    Wire.begin(21, 20);  // 指定 ESP32-S3 的 I2C 引脚
+    mpu.initialize();
+    irrecv.enableIRIn(); // 启动红外接收
+    Serial.println("IR 接收器已启动");
+
+    pinMode(MOTOR_A_PWM1, OUTPUT);
+    pinMode(MOTOR_A_PWM2, OUTPUT);
+    pinMode(MOTOR_B_PWM1, OUTPUT);
+    pinMode(MOTOR_B_PWM2, OUTPUT);
+    pinMode(HALL_A1, INPUT_PULLUP);
+    pinMode(HALL_A2, INPUT_PULLUP);
+    pinMode(HALL_B1, INPUT_PULLUP);
+    pinMode(HALL_B2, INPUT_PULLUP);
+
+    // 配置 HALL 传感器中断
+    attachInterrupt(digitalPinToInterrupt(HALL_A1), onHallA1Pulse, RISING);
+    attachInterrupt(digitalPinToInterrupt(HALL_A2), onHallA2Pulse, RISING);
+    attachInterrupt(digitalPinToInterrupt(HALL_B1), onHallB1Pulse, RISING);
+    attachInterrupt(digitalPinToInterrupt(HALL_B2), onHallB2Pulse, RISING);
+
+    // 初始化 Wi-Fi
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nWiFi 连接成功");
+
+    udp.begin(udpPort);
+
+    // 初始化卡尔曼滤波器
+    initKalmanFilter(kalmanAccelX);
+    initKalmanFilter(kalmanAccelY);
+    initKalmanFilter(kalmanAccelZ);
+    initKalmanFilter(kalmanGyroX);
+    initKalmanFilter(kalmanGyroY);
+    initKalmanFilter(kalmanGyroZ);
+}
+
+void loop() {
+    static unsigned long lastMPUTime = 0;
+    unsigned long currentTime = millis();
+
+    // 定期读取 MPU6050 数据（每 50ms）
+    if (currentTime - lastMPUTime >= 50) {
+        lastMPUTime = currentTime;
+
+        // 读取 MPU6050 数据
+        int16_t ax, ay, az, gx, gy, gz;
+        mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+
+        // 将原始数据转换为标准单位
+        float accelX = ax / 16384.0f; // 加速度计数据（单位：g）
+        float accelY = ay / 16384.0f;
+        float accelZ = az / 16384.0f;
+        float gyroX = gx / 131.0f;    // 陀螺仪数据（单位：°/s）
+        float gyroY = gy / 131.0f;
+        float gyroZ = gz / 131.0f;
+
+        // 计算时间间隔
+        static unsigned long lastTime = 0;
+        float dt = (currentTime - lastTime) / 1000.0f;
+        lastTime = currentTime;
+
+        // 应用卡尔曼滤波
+        float filteredAccelX = updateKalmanFilter(kalmanAccelX, accelX, gyroX, dt);
+        float filteredAccelY = updateKalmanFilter(kalmanAccelY, accelY, gyroY, dt);
+        float filteredAccelZ = updateKalmanFilter(kalmanAccelZ, accelZ, gyroZ, dt);
+        float filteredGyroX = updateKalmanFilter(kalmanGyroX, accelX, gyroX, dt);
+        float filteredGyroY = updateKalmanFilter(kalmanGyroY, accelY, gyroY, dt);
+        float filteredGyroZ = updateKalmanFilter(kalmanGyroZ, accelZ, gyroZ, dt);
+
+        // 打印滤波后的数据
+        Serial.printf("滤波后数据: AccelX=%.2f, AccelY=%.2f, AccelZ=%.2f, GyroX=%.2f, GyroY=%.2f, GyroZ=%.2f\n",
+                      filteredAccelX, filteredAccelY, filteredAccelZ, filteredGyroX, filteredGyroY, filteredGyroZ);
+    }
+
+    // HALL 传感器角速度计算
+    static unsigned long lastHallTime = 0;
+    unsigned long timeDiff = currentTime - lastHallTime;
+
+    if (timeDiff >= 50) {
+        lastHallTime = currentTime;
+
+        // 计算角速度（一圈7个脉冲）
+        float motorASpeed = hallA1Count * (360.0 / 7 / timeDiff); // 单位：度/秒
+        float motorBSpeed = hallB1Count * (360.0 / 7 / timeDiff); // 单位：度/秒
+
+        // 清零脉冲计数
+        resetHallCounts();
+
+        // 如果正在采集数据，将数据通过 Wi-Fi 发送到电脑
+        if (collectingData) {
+            sendData(0, 0, 0, 0, 0, 0, motorASpeed, motorBSpeed, motorAPWM, motorBPWM);
+        }
+    }
+
+    // 红外遥控处理
+    if (irrecv.decode(&results)) {
+        uint64_t value = results.value;
+        Serial.printf("接收到的红外信号: 0x%llX\n", value);
+
+        switch (value) {
+            case 0xFF30CF: // 增加左轮 PWM
+                collectingData = true;
+                motorAPWM += pwmStep;
+                setMotorPWM(motorAPWM, motorBPWM);
+                break;
+            case 0xFF10EF: // 减少左轮 PWM
+                collectingData = true;
+                motorAPWM -= pwmStep;
+                setMotorPWM(motorAPWM, motorBPWM);
+                break;
+            case 0xFF7A85: // 增加右轮 PWM
+                collectingData = true;
+                motorBPWM += pwmStep;
+                setMotorPWM(motorAPWM, motorBPWM);
+                break;
+            case 0xFF5AA5: // 减少右轮 PWM
+                collectingData = true;
+                motorBPWM -= pwmStep;
+                setMotorPWM(motorAPWM, motorBPWM);
+                break;
+            case 0xFFA25D: // 停止
+                collectingData = false;
+                stopCar();
+                break;
+            case 0xFF6897: // 设置两轮 PWM 为 -150
+                collectingData = true;
+                motorAPWM = 150;
+                motorBPWM = 150;
+                setMotorPWM(-motorAPWM, -motorBPWM);
+                break;
+        }
+        irrecv.resume();
+    }
+}
