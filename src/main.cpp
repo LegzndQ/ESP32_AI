@@ -194,7 +194,7 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(MPU_INT_PIN), onMotionDetected, FALLING);
 
     // 配置 MPU6050 的运动检测中断
-    mpu.setMotionDetectionThreshold(2); // 设置运动检测阈值
+    mpu.setMotionDetectionThreshold(0); // 设置运动检测阈值
     mpu.setMotionDetectionDuration(5);  // 设置运动检测持续时间
     mpu.setIntMotionEnabled(true);      // 启用运动检测中断
 
@@ -267,8 +267,8 @@ void loop() {
             lastHallTime = currentTime;
 
             // 计算角速度（一圈7个脉冲）
-            float motorASpeed = hallA1Count * (360.0 / 7 / timeDiff); // 单位：度/秒
-            float motorBSpeed = hallB1Count * (360.0 / 7 / timeDiff); // 单位：度/秒
+            float motorASpeed = hallA1Count * (360.0 / 7 / timeDiff * 1000 / 30); // 单位：度/秒
+            float motorBSpeed = hallB1Count * (360.0 / 7 / timeDiff * 1000 / 30); // 单位：度/秒
 
             // 清零脉冲计数
             resetHallCounts();
@@ -289,22 +289,22 @@ void loop() {
         switch (value) {
             case 0xFF30CF: // 增加左轮 PWM
                 collectingData = true;
-                motorAPWM += pwmStep;
+                motorAPWM -= pwmStep;
                 setMotorPWM(motorAPWM, motorBPWM);
                 break;
             case 0xFF10EF: // 减少左轮 PWM
                 collectingData = true;
-                motorAPWM -= pwmStep;
+                motorAPWM += pwmStep;
                 setMotorPWM(motorAPWM, motorBPWM);
                 break;
             case 0xFF7A85: // 增加右轮 PWM
                 collectingData = true;
-                motorBPWM += pwmStep;
+                motorBPWM -= pwmStep;
                 setMotorPWM(motorAPWM, motorBPWM);
                 break;
             case 0xFF5AA5: // 减少右轮 PWM
                 collectingData = true;
-                motorBPWM -= pwmStep;
+                motorBPWM += pwmStep;
                 setMotorPWM(motorAPWM, motorBPWM);
                 break;
             case 0xFFA25D: // 停止
